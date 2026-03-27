@@ -13,22 +13,24 @@ env:
   CONTAINER_LOCATION: 'us-central1-docker.pkg.dev'
   PROJECT_ID: 'website-328316'
   CONTAINER_REPOSITORY: 'website'
-  PROJECT_NAME: 'defrag'
+  PROJECT_NAME: 'defrag-tool'
 
 jobs:
   test-build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # Using Node 20 as it's the current LTS and widely supported
-        node-version: [20.x]
+        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+        node-version: [16.x]
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
+    # - name: Test Build Using Node.js ${{ matrix.node-version }}
+    - uses: actions/checkout@v2
+    - uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
+      
       
     - name: Install dependencies
       run: npm ci
@@ -40,7 +42,7 @@ jobs:
     needs: test-build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v2
 
       - name: Configure env
         run: | 
@@ -52,34 +54,26 @@ jobs:
         run: |
           echo "$GOOGLE_CLOUD_SERVICE_ACCOUNT_BASE64" | base64 -d | docker login -u _json_key --password-stdin https://$CONTAINER_LOCATION
           docker pull $CONTAINER_LOCATION/$PROJECT_ID/$CONTAINER_REPOSITORY/$PROJECT_NAME:${{ env.IMAGE_NAME }} || true
-          docker build --build-arg SERVER_NAME=defrag -t "$CONTAINER_LOCATION/$PROJECT_ID/$CONTAINER_REPOSITORY/$PROJECT_NAME:${{ env.IMAGE_NAME }}" .
+          docker build --build-arg SERVER_NAME=defrag-tool -t "$CONTAINER_LOCATION/$PROJECT_ID/$CONTAINER_REPOSITORY/$PROJECT_NAME:${{ env.IMAGE_NAME }}" .
           docker push $CONTAINER_LOCATION/$PROJECT_ID/$CONTAINER_REPOSITORY/$PROJECT_NAME:${{ env.IMAGE_NAME }}
 
   deploy-to-prod:
     if: ${{ github.ref == 'refs/heads/main' }}
     needs: build-container
     runs-on: ubuntu-latest
+    container: google/cloud-sdk:latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        
-      - id: 'auth'
-        uses: 'google-github-actions/auth@v2'
-        with:
-          credentials_json: '${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_BASE64_DECODED }}'
-          # Alternatively, if you only have the base64 version:
-          # credentials_json: '${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_BASE64 }}'
-          # Note: google-github-actions/auth handles both raw JSON and base64 strings
-
-      - name: 'Set up Cloud SDK'
-        uses: 'google-github-actions/setup-gcloud@v2'
-
       - name: Deploy to Prod
         env:
+          GOOGLE_CLOUD_SERVICE_ACCOUNT_BASE64: ${{ secrets.GOOGLE_CLOUD_SERVICE_ACCOUNT_BASE64 }}
           REGION: 'us-central1'
+          SERVICE_ACCOUNT_USER: 'gitlab@website-328316.iam.gserviceaccount.com'
         run: |
+          echo "$GOOGLE_CLOUD_SERVICE_ACCOUNT_BASE64" | base64 -d > auth.json
+          gcloud auth activate-service-account $SERVICE_ACCOUNT_USER --key-file=auth.json --project=$PROJECT_ID
+          rm auth.json
           gcloud config set run/region $REGION
           gcloud config set run/platform managed
 
-          gcloud run deploy $PROJECT_NAME --image $CONTAINER_LOCATION/$PROJECT_ID/$CONTAINER_REPOSITORY/$PROJECT_NAME:${{ env.IMAGE_NAME }}
+          gcloud run deploy $PROJECT_NAME --image $CONTAINER_LOCATION/$PROJECT_ID/$CONTAINER_REPOSITORY/$PROJECT_NAME
           gcloud run services update-traffic $PROJECT_NAME --to-latest
