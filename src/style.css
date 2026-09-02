@@ -89,6 +89,37 @@ body {
   50%       { opacity: 0; }
 }
 
+/* ── Drive / mode bar ────────────────────────────────────────────── */
+#drivebar {
+  background: #000066;
+  border-bottom: 1px solid #333366;
+  padding: 3px 12px;
+  font-size: 15px;
+  color: #8888BB;
+  letter-spacing: 0.03em;
+}
+
+.drivebar-label { margin-right: 4px; }
+
+.dtab {
+  cursor: pointer;
+  padding: 0 2px;
+  color: var(--cyan);
+}
+
+.dtab:hover   { color: var(--txt); }
+.dtab.active  { color: var(--bright); font-weight: bold; }
+
+.sep { margin: 0 8px; color: #444488; }
+
+.toggle {
+  cursor: pointer;
+  color: var(--green);
+}
+
+.toggle:hover { color: var(--txt); }
+.toggle.off   { color: var(--red); }
+
 /* ── Main content ────────────────────────────────────────────────── */
 #content {
   padding: 10px 12px 6px;
