@@ -1,4 +1,6 @@
 import './style.css';
+import { DRIVES } from './drives.js';
+import * as audio from './audio.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const COLS = 50, ROWS = 16, TOTAL = COLS * ROWS;
@@ -36,17 +38,35 @@ let pacman      = null;
 let rafId       = null;
 let dotPool     = [];   // reusable pac-dot positions
 
+let driveIdx  = 0;      // index into DRIVES — persists across restarts
+let chaosMode = true;   // bombs/flags/?/pacman/emoji layer — togglable
+let soundOn   = true;   // procedural HDD audio — togglable
+
 // ─── DOM refs ────────────────────────────────────────────────────────────────
 let $grid, $entities, $progressBar, $progressPct, $clusterInfo,
-    $status, $timer, $doneOverlay;
+    $status, $timer, $doneOverlay, $driveLabel, $driveTabs,
+    $chaosToggle, $soundToggle;
 
 // ─── HTML scaffold ───────────────────────────────────────────────────────────
 function buildApp() {
+  const driveTabsHtml = DRIVES.map((d, i) =>
+    `<span class="dtab${i === driveIdx ? ' active' : ''}" data-drive="${i}">[${d.key}:]</span>`
+  ).join(' ');
+
   document.getElementById('app').innerHTML = `
 <div id="screen">
   <div id="titlebar">
     <span>&#9608; MS-DOS DEFRAGMENTATION UTILITY  v6.22 &#9608;<span class="blink-cur">&#9612;</span></span>
-    <span>Drive C: &nbsp;[FAT-32]&nbsp; 2,048 MB</span>
+    <span id="drive-label">Drive C: &nbsp;[FAT-32]&nbsp; 2,048 MB</span>
+  </div>
+
+  <div id="drivebar">
+    <span class="drivebar-label">Select drive:</span>
+    <span id="drive-tabs">${driveTabsHtml}</span>
+    <span class="sep">&#9553;</span>
+    <span id="chaos-toggle" class="toggle" title="Bombs / flags / anomalies / chomper">[Chaos: ON]</span>
+    <span class="sep">&#9553;</span>
+    <span id="sound-toggle" class="toggle" title="Procedural HDD audio">[Sound: ON]</span>
   </div>
 
   <div id="content">
@@ -75,6 +95,7 @@ function buildApp() {
 
   <div id="controls">
     [P]&nbsp;Pause/Resume &nbsp;&#9553;&nbsp; [R]&nbsp;Restart &nbsp;&#9553;&nbsp;
+    [1-4]&nbsp;Drive &nbsp;&#9553;&nbsp; [C]&nbsp;Chaos &nbsp;&#9553;&nbsp; [M]&nbsp;Sound<br/>
     Click <b style="color:#FFFF55">FLAG</b> &#8594; deploy CHOMPER &nbsp;&#9553;&nbsp;
     Click <b style="color:#FF6600">BOMB</b> &#8594; detonate &nbsp;&#9553;&nbsp;
     Click <b style="color:#55FFFF">?</b> &#8594; release anomalies
@@ -88,7 +109,7 @@ function buildApp() {
   <div id="done-overlay">
     <div id="done-box">
       <h2>&#9608;&#9608; DEFRAGMENTATION COMPLETE &#9608;&#9608;</h2>
-      <p>${TOTAL} clusters verified &nbsp;&bull;&nbsp; Drive C: optimized<br/>Press [R] to run again</p>
+      <p>${TOTAL} clusters verified &nbsp;&bull;&nbsp; Drive optimized<br/>Press [R] to run again</p>
     </div>
   </div>
 </div>`;
@@ -101,21 +122,65 @@ function buildApp() {
   $status      = document.getElementById('status');
   $timer       = document.getElementById('timer');
   $doneOverlay = document.getElementById('done-overlay');
+  $driveLabel  = document.getElementById('drive-label');
+  $driveTabs   = document.getElementById('drive-tabs');
+  $chaosToggle = document.getElementById('chaos-toggle');
+  $soundToggle = document.getElementById('sound-toggle');
+
+  $driveTabs.addEventListener('click', e => {
+    const el = e.target.closest('[data-drive]');
+    if (el) selectDrive(+el.dataset.drive);
+  });
+  $chaosToggle.addEventListener('click', toggleChaos);
+  $soundToggle.addEventListener('click', toggleSound);
+}
+
+function updateDriveChrome() {
+  const d = DRIVES[driveIdx];
+  $driveLabel.textContent = `Drive ${d.key}:  [${d.fs}]  ${d.capacity}`;
+  [...$driveTabs.children].forEach((el, i) => el.classList.toggle('active', i === driveIdx));
+}
+
+function updateToggleChrome() {
+  $chaosToggle.textContent = `[Chaos: ${chaosMode ? 'ON' : 'OFF'}]`;
+  $chaosToggle.classList.toggle('off', !chaosMode);
+  $soundToggle.textContent = `[Sound: ${soundOn ? 'ON' : 'OFF'}]`;
+  $soundToggle.classList.toggle('off', !soundOn);
 }
 
 // ─── Cell init ────────────────────────────────────────────────────────────────
 function initCells() {
+  const d = DRIVES[driveIdx];
+
+  // fixed-size slices for the special interactive cell types — only present
+  // when chaos mode is on. Sys/bad overhead is constant either way.
+  const cFlag  = chaosMode ? 0.033 : 0;
+  const cBomb  = chaosMode ? 0.033 : 0;
+  const cQmark = chaosMode ? 0.034 : 0;
+  const cSys   = 0.048;
+  const cBad   = 0.017;
+
+  const overhead  = cFlag + cBomb + cQmark + cSys + cBad;
+  const usedShare = (1 - overhead) * d.usedFrac;
+
+  const t1 = cFlag;
+  const t2 = t1 + cBomb;
+  const t3 = t2 + cQmark;
+  const t4 = t3 + cSys;
+  const t5 = t4 + cBad;
+  const t6 = t5 + usedShare;   // remainder above t6 -> FREE
+
   cells = [];
   for (let i = 0; i < TOTAL; i++) {
     const r = Math.random();
     let type;
-    if      (r < 0.033) type = T.FLAG;
-    else if (r < 0.066) type = T.BOMB;
-    else if (r < 0.10 ) type = T.QMARK;
-    else if (r < 0.148) type = T.SYS;
-    else if (r < 0.165) type = T.BAD;
-    else if (r < 0.640) type = T.USED;
-    else                type = T.FREE;
+    if      (r < t1) type = T.FLAG;
+    else if (r < t2) type = T.BOMB;
+    else if (r < t3) type = T.QMARK;
+    else if (r < t4) type = T.SYS;
+    else if (r < t5) type = T.BAD;
+    else if (r < t6) type = T.USED;
+    else             type = T.FREE;
     cells.push({ type, el: null });
   }
   totalUsedInit = cells.filter(c => c.type === T.USED).length;
@@ -158,6 +223,7 @@ function flashCell(i, color, ms = 180) {
 function defragStep() {
   if (!defragActive || defragComplete) return;
 
+  let moved = false;
   for (let ops = 0; ops < 5; ops++) {
     // advance head past non-FREE cells
     while (defragHead < TOTAL && cells[defragHead].type !== T.FREE) defragHead++;
@@ -178,7 +244,10 @@ function defragStep() {
     setType(src, T.FREE);
     defragHead++;
     swapCount++;
+    moved = true;
   }
+
+  if (moved) audio.playSeek();
 
   updateProgress();
 
@@ -193,6 +262,7 @@ function finishDefrag() {
   defragActive   = false;
   updateProgress();
   setStatus(`▓▓ Defragmentation complete. ${swapCount} cluster operations performed. ▓▓`, true);
+  audio.playComplete();
   setTimeout(() => { $doneOverlay.classList.add('visible'); }, 1200);
 }
 
@@ -225,6 +295,7 @@ function detonateBomb(i) {
   cells[i].el.textContent = '💥';
 
   setStatus(`⚠ CRITICAL: Sector ${i} explosive decompression! Cluster integrity FAILING!`, true);
+  audio.playExplosion();
   spawnBlast(i);
 
   // ripple destruction — first ring after 200ms, second after 450ms
@@ -280,6 +351,7 @@ function releaseAnomalies(i) {
   const oy = OY + row * SH;
   const count = 4 + Math.floor(Math.random() * 5);
 
+  audio.playRelease();
   for (let k = 0; k < count; k++) {
     spawnEmoji(ox + Math.random() * 8 - 4, oy + Math.random() * 5 - 2.5);
   }
@@ -294,6 +366,7 @@ function releaseAnomalies(i) {
 function releaseChomper(i) {
   setType(i, T.FREE);
   const col = i % COLS, row = Math.floor(i / COLS);
+  audio.playDeploy();
   spawnPacman(col, row);
   setStatus(`⚑ FLAG cluster ${i}: CHOMPER protocol activated. Anomaly containment in progress.`, true);
 }
@@ -438,6 +511,7 @@ function spawnDot(x, y) {
 function eatEmoji(e) {
   e.alive = false;
   e.el.classList.add('eaten');
+  audio.playChomp();
 
   // score pop
   const pop = document.createElement('div');
@@ -452,7 +526,7 @@ function eatEmoji(e) {
 
   const rem = emojis.filter(e2 => e2.alive).length;
   if (rem === 0) {
-    setStatus('All anomalous entities neutralised. Drive C: stability restored. CHOMPER satisfied.', false);
+    setStatus('All anomalous entities neutralised. Drive stability restored. CHOMPER satisfied.', false);
   }
 }
 
@@ -475,6 +549,28 @@ function updateTimer() {
   $timer.textContent = `Elapsed: ${h}:${m}:${s}`;
 }
 
+// ─── Drive / chaos / sound toggles ────────────────────────────────────────────
+function selectDrive(idx) {
+  if (idx === driveIdx || idx < 0 || idx >= DRIVES.length) return;
+  driveIdx = idx;
+  audio.playClick();
+  updateDriveChrome();
+  restart();
+}
+
+function toggleChaos() {
+  chaosMode = !chaosMode;
+  audio.playClick();
+  updateToggleChrome();
+  restart();
+}
+
+function toggleSound() {
+  soundOn = !audio.toggleMuted();
+  updateToggleChrome();
+  audio.playClick();
+}
+
 // ─── Keyboard ─────────────────────────────────────────────────────────────────
 function initKeys() {
   document.addEventListener('keydown', e => {
@@ -488,6 +584,9 @@ function initKeys() {
       );
     }
     if (k === 'r') restart();
+    if (k === 'c') toggleChaos();
+    if (k === 'm') toggleSound();
+    if (['1','2','3','4'].includes(k)) selectDrive(+k - 1);
   });
 }
 
@@ -516,11 +615,13 @@ function restart() {
   renderGrid();
   updateProgress();
   updateTimer();
-  setStatus('Re-initializing drive C: ...');
+  updateDriveChrome();
+  updateToggleChrome();
+  setStatus(`Re-initializing drive ${DRIVES[driveIdx].key}: ...`);
 
   setTimeout(() => {
     defragActive = true;
-    setStatus('Defragmenting drive C: ... Click special sectors to interact.');
+    setStatus(`Defragmenting drive ${DRIVES[driveIdx].key}: ... Click special sectors to interact.`);
   }, 1000);
 
   rafId = requestAnimationFrame(loop);
@@ -542,16 +643,19 @@ function loop(ts) {
 }
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
+audio.initAudio();
 buildApp();
 initCells();
 renderGrid();
 initKeys();
 updateProgress();
-setStatus('Analyzing drive C: ...');
+updateDriveChrome();
+updateToggleChrome();
+setStatus(`Analyzing drive ${DRIVES[driveIdx].key}: ...`);
 
 setTimeout(() => {
   defragActive = true;
-  setStatus('Defragmenting drive C: ... Click yellow F blocks, orange B blocks, or cyan ? blocks to interact.');
+  setStatus('Defragmenting ... Click yellow F blocks, orange B blocks, or cyan ? blocks to interact.');
 }, 1100);
 
 rafId = requestAnimationFrame(loop);
